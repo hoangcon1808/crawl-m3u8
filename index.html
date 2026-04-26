@@ -1,130 +1,83 @@
 <!doctype html>
 <html lang="vi">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#14201d">
-  <title>M3U8 Crawler</title>
-  <link rel="icon" href="/assets/img/brand-mark.png" type="image/png">
-  <link rel="stylesheet" href="/assets/css/client.css">
-  <script src="/assets/js/client.js" defer></script>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#14201d">
+    <title>M3U8 Crawler</title>
+    <link rel="icon" href="/assets/img/brand-mark.png" type="image/png">
+    <link rel="stylesheet" href="/assets/css/client.css">
+    <script src="/assets/js/client.js" defer></script>
 </head>
 <body>
-  <main class="app-shell">
-    <header class="app-header">
-      <a class="brand" href="/" aria-label="M3U8 Crawler">
-        <img class="brand-mark" src="/assets/img/brand-mark.png" alt="" width="44" height="44">
-        <span class="brand-copy">
-          <span class="brand-title">M3U8 Crawler</span>
-          <span class="brand-subtitle">Xuất danh sách kênh từ nguồn trận đấu</span>
-        </span>
-      </a>
-      <div id="status" class="status-pill" role="status" aria-live="polite">Sẵn sàng</div>
-    </header>
+    <main class="app-shell">
+        <header class="app-header">
+            <a class="brand" href="/" aria-label="M3U8 Crawler">
+                <img class="brand-mark" src="/assets/img/brand-mark.png" alt="" width="44" height="44">
+                <span class="brand-copy">
+                    <span class="brand-title">M3U8 Crawler</span>
+                    <span class="brand-subtitle">Xuất danh sách kênh từ nguồn trận đấu</span>
+                </span>
+            </a>
+            <div id="status" class="status-pill" role="status" aria-live="polite">Sẵn sàng</div>
+        </header>
 
-    <section class="workspace">
-      <form id="crawlForm" class="tool-panel">
-        <div class="field">
-          <label for="sourceUrl">Link nguồn</label>
-          <textarea id="sourceUrl" name="sourceUrl" rows="6" placeholder="https://hoadaotv.info/&#10;https://cumeo2.link/" autocomplete="url" required>https://hoadaotv.info/</textarea>
-        </div>
+        <section class="workspace">
+            <form id="crawlForm" class="tool-panel">
+                <div class="field">
+                    <label for="sourceUrl">Link nguồn</label>
+                    <textarea id="sourceUrl" name="sourceUrl" rows="6" placeholder="https://hoadaotv.info/&#10;https://cumeo2.link/" required>https://hoadaotv.info/</textarea>
+                </div>
 
-        <div class="control-grid">
-          <div class="field">
-            <span class="field-label">Định dạng file</span>
-            <div class="segmented-control" role="radiogroup" aria-label="Định dạng file">
-              <label class="segment">
-                <input type="radio" name="format" value="json" checked>
-                <span>JSON</span>
-              </label>
-              <label class="segment">
-                <input type="radio" name="format" value="txt">
-                <span>TXT</span>
-              </label>
-            </div>
-          </div>
+                <div class="control-grid">
+                    <div class="field">
+                        <span class="field-label">Định dạng file</span>
+                        <div class="segmented-control">
+                            <label class="segment">
+                                <input type="radio" name="format" value="json" checked> <span>JSON</span>
+                            </label>
+                            <label class="segment">
+                                <input type="radio" name="format" value="txt"> <span>TXT</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="field field-small">
+                        <label for="maxMatches">Số trận</label>
+                        <input id="maxMatches" name="maxMatches" type="number" min="1" max="80" value="80">
+                    </div>
+                </div>
 
-          <div class="field field-small">
-            <label for="maxMatches">Số trận</label>
-            <input id="maxMatches" name="maxMatches" type="number" min="1" max="80" value="80" inputmode="numeric">
-          </div>
-        </div>
+                <div class="actions">
+                    <button id="exportButton" class="button button-primary" type="submit">
+                        <span id="buttonSpinner" class="spinner hidden"></span>
+                        <svg id="buttonIcon" class="button-icon" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"></path><path d="M14 11a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1"></path></svg>
+                        <span>Lấy link</span>
+                    </button>
+                    <button id="clearButton" class="button button-icon-only" type="button" title="Xóa">
+                        <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 14h10l1-14M9 7V4h6v3"></path></svg>
+                    </button>
+                </div>
 
-        <div class="actions">
-          <button id="exportButton" class="button button-primary" type="submit">
-            <span id="buttonSpinner" class="spinner hidden" aria-hidden="true"></span>
-            <svg id="buttonIcon" class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"></path>
-              <path d="M14 11a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1"></path>
-            </svg>
-            <span>Lấy link</span>
-          </button>
+                <dl class="file-meta">
+                    <div class="meta-row"> <dt>File</dt> <dd id="fileName">-</dd> </div>
+                    <div class="meta-row"> <dt>Dung lượng</dt> <dd id="fileSize">-</dd> </div>
+                    <div class="meta-row"> <dt>Thời gian</dt> <dd id="createdAt">-</dd> </div>
+                    <div class="meta-row"> <dt>Link</dt> <dd>
+                        <a id="storageLink" class="meta-link hidden" href="#" target="_blank">Mở link</a>
+                        <span id="storageEmpty">-</span>
+                    </dd> </div>
+                </dl>
+            </form>
 
-          <button id="clearButton" class="button button-icon-only" type="button" title="Xóa kết quả" aria-label="Xóa kết quả">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 7h16"></path>
-              <path d="M10 11v6"></path>
-              <path d="M14 11v6"></path>
-              <path d="M6 7l1 14h10l1-14"></path>
-              <path d="M9 7V4h6v3"></path>
-            </svg>
-          </button>
-        </div>
-
-        <dl class="file-meta" aria-live="polite">
-          <div class="meta-row">
-            <dt>File</dt>
-            <dd id="fileName">-</dd>
-          </div>
-          <div class="meta-row">
-            <dt>Dung lượng</dt>
-            <dd id="fileSize">-</dd>
-          </div>
-          <div class="meta-row">
-            <dt>Thời gian</dt>
-            <dd id="createdAt">-</dd>
-          </div>
-          <div class="meta-row">
-            <dt>Link</dt>
-            <dd>
-              <a id="storageLink" class="meta-link hidden" href="#" target="_blank" rel="noopener">Mở link</a>
-              <span id="storageEmpty">-</span>
-            </dd>
-          </div>
-        </dl>
-      </form>
-
-      <section class="preview-panel" aria-label="Xem trước kết quả">
-        <div class="preview-head">
-          <div class="preview-title">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-              <path d="M14 2v6h6"></path>
-              <path d="M8 13h8"></path>
-              <path d="M8 17h5"></path>
-            </svg>
-            <span>Xem trước</span>
-          </div>
-
-          <button id="copyButton" class="button button-icon-only" type="button" title="Sao chép" aria-label="Sao chép" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-          </button>
-
-          <button id="downloadButton" class="button button-icon-only" type="button" title="Tải file" aria-label="Tải file" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3v12"></path>
-              <path d="M7 10l5 5 5-5"></path>
-              <path d="M5 21h14"></path>
-            </svg>
-          </button>
-        </div>
-
-        <pre id="preview" class="preview-output empty">Chưa có dữ liệu</pre>
-      </section>
-    </section>
-  </main>
+            <section class="preview-panel">
+                <div class="preview-head">
+                    <div class="preview-title"><span>Xem trước</span></div>
+                    <button id="copyButton" class="button button-icon-only" type="button" disabled><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
+                    <button id="downloadButton" class="button button-icon-only" type="button" disabled><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"></path></svg></button>
+                </div>
+                <pre id="preview" class="preview-output empty">Chưa có dữ liệu</pre>
+            </section>
+        </section>
+    </main>
 </body>
 </html>
