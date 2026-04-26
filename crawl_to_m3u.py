@@ -11,7 +11,7 @@ from html import unescape
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlparse, urlunparse
 
-START_URL = "https://hoadaotv.info/"
+START_URL = ""
 
 OUT_M3U = ""
 OUT_JSON = ""
