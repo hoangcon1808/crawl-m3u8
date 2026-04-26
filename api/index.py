@@ -6,174 +6,150 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import requests
+import cloudscraper # Đảm bảo đã có trong requirements.txt
 from flask import Flask, Response, request, send_from_directory
-from dotenv import load_dotenv
 
-# Xác định thư mục gốc của dự án
+# Thiết lập đường dẫn hệ thống để import crawl_to_m3u.py
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Import các hàm từ crawl_to_m3u.py
+# Import logic từ file crawl của bạn
 try:
     from crawl_to_m3u import MAX_MATCHES, START_URL, crawl, merge_crawls
 except ImportError:
-    # Giá trị dự phòng nếu không tìm thấy file crawl
+    # Giá trị fallback nếu file crawl chưa sẵn sàng
     MAX_MATCHES = 100
     START_URL = "https://hoadaotv.info/"
-    def crawl(**kwargs): return {"json": [], "m3u": "#EXTM3U", "stats": {}}
-    def merge_crawls(*args, **kwargs): return {"json": [], "m3u": "#EXTM3U", "stats": {}}
+    def crawl(**kwargs): return {"json": {"error": "Crawl script missing"}, "m3u": "", "stats": {}}
+    def merge_crawls(*args, **kwargs): return {"json": {}, "m3u": "", "stats": {}}
 
 app = Flask(__name__)
-load_dotenv() # Load .env nếu chạy local
 
-# --- CẤU HÌNH HỆ THỐNG ---
-MAX_STORAGE_UPLOAD_BYTES = 8 * 1024 * 1024
+# Cấu hình giới hạn
+MAX_STORAGE_UPLOAD_BYTES = 8 * 1024 * 1024  # 8MB
+SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 
-def get_cors_headers(is_cache=True):
-    headers = {"Access-Control-Allow-Origin": "*"}
-    if is_cache:
-        headers["Cache-Control"] = "public, s-maxage=60, stale-while-revalidate=120"
-    else:
-        headers["Cache-Control"] = "no-store, no-cache, must-revalidate, post-check=0, pre-check=0"
-    return headers
+# --- HELPER FUNCTIONS ---
 
-# --- SUPABASE UTILITIES ---
+def load_local_env() -> None:
+    """Load biến môi trường từ file .env khi chạy local"""
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
-def get_supabase_env():
-    return {
-        "url": (os.getenv("SUPABASE_URL") or "").strip().rstrip("/"),
-        "key": (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip(),
-        "bucket": (os.getenv("SUPABASE_STORAGE_BUCKET") or "link").strip(),
-        "is_public": os.getenv("SUPABASE_PUBLIC_BUCKET", "true").lower() in ["true", "1", "yes"],
-        "upload_dir": (os.getenv("SUPABASE_UPLOAD_DIR") or "").strip("/")
-    }
+load_local_env()
 
-def ensure_bucket_exists():
-    """Tự động kiểm tra và tạo Bucket nếu chưa tồn tại"""
-    env = get_supabase_env()
-    if not env["url"] or not env["key"]:
-        return env["bucket"]
-        
-    headers = {"apikey": env["key"], "Authorization": f"Bearer {env['key']}"}
-    try:
-        # Kiểm tra danh sách bucket hiện có
-        res = requests.get(f"{env['url']}/storage/v1/bucket", headers=headers, timeout=5)
-        if res.status_code == 200:
-            buckets = res.json()
-            if not any(b.get("id") == env["bucket"] for b in buckets):
-                # Tạo mới nếu không tìm thấy
-                requests.post(
-                    f"{env['url']}/storage/v1/bucket", 
-                    headers=headers, 
-                    json={"id": env["bucket"], "name": env["bucket"], "public": env["is_public"]},
-                    timeout=5
-                )
-    except Exception as e:
-        print(f"Lỗi kiểm tra bucket: {e}")
-    return env["bucket"]
+# --- SUPABASE CONFIG GETTERS ---
 
-def generate_storage_url(object_path):
-    """Tạo link trả về (Public URL hoặc Signed URL)"""
-    env = get_supabase_env()
-    if env["is_public"]:
-        return f"{env['url']}/storage/v1/object/public/{quote(env['bucket'])}/{quote(object_path, safe='/')}"
+def supabase_url() -> str:
+    raw = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    if not raw: raise RuntimeError("Thiếu SUPABASE_URL.")
+    return raw
+
+def supabase_key() -> str:
+    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or "").strip()
+    if not key: raise RuntimeError("Thiếu SUPABASE_SERVICE_ROLE_KEY.")
+    return key
+
+def supabase_bucket() -> str:
+    return (os.getenv("SUPABASE_STORAGE_BUCKET") or "link").strip().strip("/")
+
+def supabase_public_bucket() -> bool:
+    return os.getenv("SUPABASE_PUBLIC_BUCKET", "true").lower() in {"true", "1", "yes"}
+
+def ensure_supabase_bucket() -> str:
+    """Tự động kiểm tra và tạo Bucket nếu chưa có"""
+    base_url = supabase_url()
+    key = supabase_key()
+    target = supabase_bucket()
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
     
-    # Logic tạo Signed URL cho Private Bucket
-    headers = {"apikey": env["key"], "Authorization": f"Bearer {env['key']}"}
-    expires = int(os.getenv("SUPABASE_SIGNED_URL_EXPIRES", "3600"))
+    try:
+        # Kiểm tra danh sách bucket
+        res = requests.get(f"{base_url}/storage/v1/bucket", headers=headers, timeout=10)
+        if res.status_code == 200:
+            if any(b.get("id") == target for b in res.json()):
+                return target
+        
+        # Nếu không thấy, tạo mới
+        payload = {"id": target, "name": target, "public": supabase_public_bucket()}
+        requests.post(f"{base_url}/storage/v1/bucket", headers=headers, json=payload, timeout=10)
+        return target
+    except:
+        return target
+
+# --- URL GENERATORS ---
+
+def get_final_storage_url(object_path: str) -> str:
+    """Tự động lấy link Public hoặc Signed URL"""
+    base_url = supabase_url()
+    bucket = supabase_bucket()
+    key = supabase_key()
+    
+    if supabase_public_bucket():
+        return f"{base_url}/storage/v1/object/public/{quote(bucket)}/{quote(object_path, safe='/')}"
+    
+    # Nếu là private, tạo signed URL (hết hạn sau 1 giờ)
+    expire = int(os.getenv("SUPABASE_SIGNED_URL_EXPIRES", "3600"))
     res = requests.post(
-        f"{env['url']}/storage/v1/object/sign/{quote(env['bucket'])}/{quote(object_path, safe='/')}",
-        headers=headers,
-        json={"expiresIn": expires},
+        f"{base_url}/storage/v1/object/sign/{quote(bucket)}/{quote(object_path, safe='/')}",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={"expiresIn": expire},
         timeout=10
     )
     if res.status_code == 200:
-        return f"{env['url']}/storage/v1{res.json().get('signedURL')}"
+        path = res.json().get("signedURL", "")
+        return f"{base_url}/storage/v1{path}"
     return ""
 
 # --- API ROUTES ---
 
-def finalize_text_output(data):
-    """CHỐT: Chuyển đổi list hoặc dữ liệu thô sang chuỗi văn bản sạch để fix lỗi hiển thị []"""
-    if isinstance(data, list):
-        return "\n".join(str(item) for item in data)
-    return str(data or "")
-
 @app.route("/api/crawl", methods=["GET", "OPTIONS"])
-def route_crawl():
-    if request.method == "OPTIONS":
-        return Response(status=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET"})
+def crawl_route():
+    if request.method == "OPTIONS": return Response(status=204, headers={"Access-Control-Allow-Origin": "*"})
     
-    source = request.args.get("link") or request.args.get("url") or START_URL
+    link = request.args.get("link") or START_URL
     fmt = request.args.get("format", "json").lower()
     
     try:
-        result = crawl(max_matches=100, source_url=source)
+        # Gọi hàm crawl từ crawl_to_m3u.py
+        result = crawl(max_matches=100, source_url=link)
+        
         if fmt == "m3u":
-            content = finalize_text_output(result.get("m3u", "#EXTM3U"))
-            return Response(content, content_type="text/plain; charset=utf-8", headers=get_cors_headers())
-        
-        return Response(json.dumps(result.get("json", []), ensure_ascii=False), 
-                        content_type="application/json", headers=get_cors_headers())
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
-
-@app.route("/api/merge", methods=["GET", "POST", "OPTIONS"])
-def route_merge():
-    if request.method == "OPTIONS":
-        return Response(status=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST"})
-    
-    if request.method == "POST":
-        payload = request.get_json(silent=True) or {}
-        links = payload.get("links") or [payload.get("link")]
-        fmt = str(payload.get("format", "json")).lower()
-    else:
-        links = request.args.getlist("link") or request.args.get("links", "").split()
-        fmt = request.args.get("format", "json").lower()
-
-    if not links or not any(links):
-        return {"ok": False, "error": "No links provided"}, 400
-
-    try:
-        result = merge_crawls(links)
-        if fmt in ["m3u", "txt"]:
-            content = finalize_text_output(result.get("m3u", "#EXTM3U"))
-            return Response(content, content_type="text/plain; charset=utf-8", headers=get_cors_headers(False))
-        
-        return Response(json.dumps(result.get("json", []), ensure_ascii=False), 
-                        content_type="application/json", headers=get_cors_headers(False))
+            return Response(result["m3u"], content_type="text/plain; charset=utf-8")
+        return Response(json.dumps(result["json"], ensure_ascii=False), content_type="application/json")
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
 @app.route("/api/supabase/upload", methods=["POST", "OPTIONS"])
-def route_upload():
-    if request.method == "OPTIONS":
-        return Response(status=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST"})
+def upload_route():
+    if request.method == "OPTIONS": return Response(status=204, headers={"Access-Control-Allow-Origin": "*"})
     
-    data = request.get_json(silent=True) or {}
-    filename = data.get("filename", "output.m3u")
-    content = finalize_text_output(data.get("content", ""))
+    payload = request.get_json(silent=True) or {}
+    filename = payload.get("filename", "output.txt")
+    content = payload.get("content", "")
     
-    if not content:
-        return {"ok": False, "error": "Content is empty"}, 400
+    if not content: return {"ok": False, "error": "Content is empty"}, 400
 
     try:
-        env = get_supabase_env()
-        bucket = ensure_bucket_exists()
+        bucket = ensure_supabase_bucket()
+        folder = (os.getenv("SUPABASE_UPLOAD_DIR") or "").strip("/")
+        object_path = f"{folder}/{filename}" if folder else filename
         
-        # Xây dựng đường dẫn file
-        clean_filename = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
-        object_path = f"{env['upload_dir']}/{clean_filename}" if env['upload_dir'] else clean_filename
-        
-        # Thực hiện Upload bằng Requests (không cần thư viện Supabase cồng kềnh)
+        # Upload
         res = requests.post(
-            f"{env['url']}/storage/v1/object/{quote(bucket)}/{quote(object_path, safe='/')}",
+            f"{supabase_url()}/storage/v1/object/{quote(bucket)}/{quote(object_path, safe='/')}",
             headers={
-                "apikey": env["key"], 
-                "Authorization": f"Bearer {env['key']}",
-                "x-upsert": "true",
-                "Content-Type": "text/plain; charset=utf-8"
+                "apikey": supabase_key(),
+                "Authorization": f"Bearer {supabase_key()}",
+                "x-upsert": "true"
             },
             data=content.encode("utf-8"),
             timeout=30
@@ -184,22 +160,19 @@ def route_upload():
             
         return {
             "ok": True,
-            "url": generate_storage_url(object_path),
-            "filename": clean_filename,
+            "url": get_final_storage_url(object_path),
             "path": object_path
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-# --- STATIC CLIENT ROUTES ---
-
-@app.route("/")
-def serve_index():
+@app.route("/", methods=["GET"])
+def index():
     return send_from_directory(str(ROOT), "index.html")
 
 @app.route("/assets/<path:path>")
-def serve_assets(path):
+def send_assets(path):
     return send_from_directory(str(ROOT / "assets"), path)
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(port=5000, debug=True)
