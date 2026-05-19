@@ -11,7 +11,7 @@ from html import unescape
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlparse, urlunparse
 
-START_URL = ""
+START_URL = "https://hoadaotv.info/"
 
 OUT_M3U = ""
 OUT_JSON = ""
@@ -49,6 +49,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # Bắt stream URL tuyệt đối trong HTML/inline JS.
 STREAM_URL_RE = re.compile(r'https?:[/\\]{2}[^\s"\'<>]+?\.(?:m3u8|flv)(?:\?[^\s"\'<>]+)?', re.IGNORECASE)
+SCRIPT_IMPORT_RE = re.compile(
+    r'(?:from\s*|import\s*\()\s*["\']([^"\']+\.js(?:\?[^"\']*)?)["\']',
+    re.IGNORECASE,
+)
+MAX_DISCOVERY_SCRIPTS = 24
 
 # Bắt giờ kiểu 09:30, 11:00
 TIME_RE = re.compile(r"\b(\d{1,2}:\d{2})\b")
@@ -1039,8 +1044,20 @@ def script_urls_from_html(home_html: str, source_url: str) -> list[str]:
     soup = BeautifulSoup(home_html, "html.parser")
     seen = set()
     out = []
-    for script in soup.find_all("script", src=True):
-        script_url = urljoin(source_url, script.get("src", ""))
+    assets = [script.get("src", "") for script in soup.find_all("script", src=True)]
+    for link in soup.find_all("link", href=True):
+        rels = {value.lower() for value in (link.get("rel") or [])}
+        href = link.get("href", "")
+        if not href:
+            continue
+        if "modulepreload" in rels:
+            assets.append(href)
+            continue
+        if "preload" in rels and (link.get("as", "").lower() == "script" or href.lower().endswith(".js")):
+            assets.append(href)
+
+    for asset in assets:
+        script_url = urljoin(source_url, asset)
         key = script_url.split("#", 1)[0]
         if key in seen or not relevant_script_url(key, source_url):
             continue
@@ -1048,13 +1065,36 @@ def script_urls_from_html(home_html: str, source_url: str) -> list[str]:
         out.append(key)
     return out[:12]
 
+def imported_script_urls(script_text: str, base_url: str, source_url: str) -> list[str]:
+    seen = set()
+    out = []
+    for match in SCRIPT_IMPORT_RE.findall(script_text or ""):
+        script_url = urljoin(base_url, unescape(match))
+        key = script_url.split("#", 1)[0]
+        if key in seen or not relevant_script_url(key, source_url):
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
 def discovery_texts(session: requests.Session, home_html: str, source_url: str) -> list[str]:
     texts = [home_html]
-    for script_url in script_urls_from_html(home_html, source_url):
+    queue = script_urls_from_html(home_html, source_url)
+    seen = set()
+    while queue and len(seen) < MAX_DISCOVERY_SCRIPTS:
+        script_url = queue.pop(0)
+        key = script_url.split("#", 1)[0]
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             response = session.get(script_url, timeout=TIMEOUT)
             if response.status_code == 200:
-                texts.append(decoded_response_text(response))
+                script_text = decoded_response_text(response)
+                texts.append(script_text)
+                for imported_url in imported_script_urls(script_text, script_url, source_url):
+                    if imported_url not in seen and imported_url not in queue:
+                        queue.append(imported_url)
         except Exception:
             continue
     return texts
@@ -1065,6 +1105,14 @@ def discover_api_candidates(session: requests.Session, home_html: str, source_ur
     seen_urls = set()
     for raw in re.findall(r'https?://[^\s"\'`)]+', combined):
         clean_url = unescape(raw).replace("\\/", "/").rstrip(";,")
+        if "${" in clean_url:
+            continue
+        try:
+            parsed = urlparse(clean_url)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
         if clean_url not in seen_urls:
             seen_urls.add(clean_url)
             urls.append(clean_url)
@@ -1080,7 +1128,10 @@ def discover_api_candidates(session: requests.Session, home_html: str, source_ur
         candidates.append({"kind": kind, "url": url.rstrip("/"), **extra})
 
     for url in urls:
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
         path = parsed.path.rstrip("/")
         if path.endswith("/api/v1/external"):
             add("external-fixtures", url)
@@ -1091,7 +1142,10 @@ def discover_api_candidates(session: requests.Session, home_html: str, source_ur
 
     if "/matches/graph" in combined:
         for url in urls:
-            parsed = urlparse(url)
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                continue
             if "api" in (parsed.hostname or "") and parsed.path in {"", "/"}:
                 add("matches-graph", url)
 
