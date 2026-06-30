@@ -1,166 +1,327 @@
-import json
-import os
-import re
-import sys
-from pathlib import Path
-from datetime import datetime, timedelta
+(() => {
+    "use strict";
+    
+    const form = document.querySelector("#crawlForm");
+    const sourceUrl = document.querySelector("#sourceUrl");
+    const maxMatches = document.querySelector("#maxMatches");
+    const exportButton = document.querySelector("#exportButton");
+    const txtPrintButton = document.querySelector("#txtPrintButton");
+    const buttonSpinner = document.querySelector("#buttonSpinner");
+    const buttonIcon = document.querySelector("#buttonIcon");
+    const clearButton = document.querySelector("#clearButton");
+    const copyButton = document.querySelector("#copyButton");
+    const downloadButton = document.querySelector("#downloadButton");
+    const statusBox = document.querySelector("#status");
+    const preview = document.querySelector("#preview");
+    const fileName = document.querySelector("#fileName");
+    const fileSize = document.querySelector("#fileSize");
+    const createdAt = document.querySelector("#createdAt");
+    const storageLink = document.querySelector("#storageLink");
+    const storageEmpty = document.querySelector("#storageEmpty");
+    
+    let currentOutput = "";
+    let currentFileName = "";
+    let currentFormat = "json";
+    let currentSize = 0;
+    let isBusy = false;
 
-import requests
-import certifi
-from flask import Flask, Response, request, send_from_directory
-from dotenv import load_dotenv
-from pymongo import MongoClient
-from bson.objectid import ObjectId
-
-# Thiết lập đường dẫn module crawl_to_m3u
-ROOT = Path(__file__).resolve().parents[1]
-current_dir = os.path.dirname(__file__)
-
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-import crawl_to_m3u
-
-app = Flask(__name__)
-load_dotenv()
-
-# --- CẤU HÌNH & KẾT NỐI MONGODB ---
-mongo_client = None
-
-def get_mongo_cfg():
-    return {
-        "uri": os.getenv("MONGO_URI", "").strip(),
-        "db_name": os.getenv("MONGO_DB_NAME", "crawl_database").strip(),
-        "collection": os.getenv("MONGO_COLLECTION_NAME", "stream_links").strip(),
-        "enable_ttl": os.getenv("MONGO_ENABLE_TTL", "true").lower() == "true",
-        "ttl_hours": int(os.getenv("MONGO_TTL_HOURS", "24").strip())
+    // --- HELPER FUNCTIONS ---
+    function getApiPath() {
+        return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/crawl" : "/api/crawl";
     }
 
-def get_mongo_collection():
-    global mongo_client
-    cfg = get_mongo_cfg()
-    
-    if not cfg["uri"]:
-        raise ValueError("Thiếu cấu hình MONGO_URI")
-    
-    if mongo_client is None:
-        # Cấu hình "kích hoạt" kết nối Serverless Vercel (fix lỗi SSL và Timeout)
-        mongo_client = MongoClient(
-            cfg["uri"],
-            tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=10000,
-            connectTimeoutMS=10000,
-            retryWrites=True
-        )
-        
-    db = mongo_client[cfg["db_name"]]
-    return db[cfg["collection"]], cfg
+    function getMergePath() {
+        return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/merge" : "/api/merge";
+    }
 
-def ensure_ttl_index():
-    try:
-        collection, cfg = get_mongo_collection()
-        if cfg["enable_ttl"]:
-            collection.create_index("expireAt", expireAfterSeconds=0)
-    except Exception as e:
-        print(f"Bỏ qua lỗi tạo Index: {e}")
+    function getDatabaseSavePath() {
+        return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/database/save" : "/api/database/save";
+    }
 
-# --- HÀM TRỢ GIÚP ---
-def to_clean_text(data):
-    if isinstance(data, list):
-        return "\n".join(str(item).strip() for item in data if item)
-    return str(data or "").strip()
+    function selectedFormat() {
+        return new FormData(form).get("format") || "json";
+    }
 
-# --- CÁC ROUTE API ---
-@app.route("/api/crawl")
-def route_crawl():
-    link = request.args.get("link") or crawl_to_m3u.START_URL
-    fmt = request.args.get("format", "json").lower()
-    max_m = int(request.args.get("max", 80))
-    try:
-        result = crawl_to_m3u.crawl(max_matches=max_m, source_url=link)
-        if fmt in ["m3u", "txt"]:
-            return Response(to_clean_text(result.get("m3u")), content_type="text/plain; charset=utf-8")
-        return Response(json.dumps(result.get("json"), ensure_ascii=False), content_type="application/json")
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
+    function normalizeUrl(value) {
+        const trimmed = value.trim();
+        if (!trimmed) return "";
+        return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    }
 
-@app.route("/api/merge", methods=["POST", "GET"])
-def route_merge():
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        links = data.get("links") or [data.get("link")]
-        fmt = str(data.get("format", "json")).lower()
-        max_m = int(data.get("max", 80))
-    else:
-        links = request.args.getlist("link") or request.args.get("links", "").split()
-        fmt = request.args.get("format", "json").lower()
-        max_m = int(request.args.get("max", 80))
-    try:
-        result = crawl_to_m3u.merge_crawls(links, max_matches=max_m)
-        if fmt in ["m3u", "txt"]:
-            return Response(to_clean_text(result.get("m3u")), content_type="text/plain; charset=utf-8")
-        return Response(json.dumps(result.get("json"), ensure_ascii=False), content_type="application/json")
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
+    function parseSourceUrls(value) {
+        const urls = [];
+        const seen = new Set();
+        for (const item of value.split(/[\s,]+/)) {
+            const url = normalizeUrl(item);
+            if (!url) continue;
+            const key = url.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            urls.push(url);
+        }
+        return urls;
+    }
 
-@app.route("/api/database/save", methods=["POST"])
-def route_save_to_mongo():
-    try:
-        ensure_ttl_index()
+    function slugify(value) {
+        return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "crawl";
+    }
+
+    function buildFileName(urlValues, format) {
+        const values = Array.isArray(urlValues) ? urlValues : [urlValues];
+        const ext = format === "json" ? "json" : (format === "txt" ? "txt" : "m3u");
+        if (values.length > 1) return `bongda.${ext}`;
         
-        data = request.get_json(silent=True) or {}
-        filename = data.get("filename", "playlist.m3u")
-        content = to_clean_text(data.get("content", ""))
+        const urlValue = values[0] || "";
+        let label = "crawl";
+        try {
+            const parsed = new URL(urlValue);
+            const hostParts = parsed.hostname.replace(/^www\./, "").split(".").filter(Boolean);
+            label = hostParts.length > 1 ? hostParts.slice(0, -1).join("-") : hostParts[0] || label;
+        } catch (error) {
+            label = urlValue;
+        }
+        return `${slugify(label)}.${ext}`;
+    }
+
+    function formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        const units = ["KB", "MB", "GB"];
+        let value = bytes / 1024;
+        let index = 0;
+        while (value >= 1024 && index < units.length - 1) {
+            value /= 1024;
+            index += 1;
+        }
+        return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[index]}`;
+    }
+
+    function convertJsonToM3u(jsonString) {
+        try {
+            const data = JSON.parse(jsonString);
+            if (!Array.isArray(data)) return jsonString;
+            let m3u = "#EXTM3U\n";
+            data.forEach(item => {
+                const title = item.title || "Kênh không tên";
+                const url = item.url || item.stream_url || "";
+                if (url) m3u += `#EXTINF:-1,${title}\n${url}\n`;
+            });
+            return m3u;
+        } catch (e) {
+            console.error("Lỗi parse JSON:", e);
+            return jsonString;
+        }
+    }
+
+    function updateOutputButtons() {
+        const hasOutput = Boolean(currentOutput && currentFileName);
+        copyButton.disabled = !currentOutput;
+        downloadButton.disabled = !hasOutput;
+        if (txtPrintButton) txtPrintButton.disabled = !currentOutput || currentFormat !== "json";
+    }
+
+    function setBusy(nextBusy, showSpinner = false) {
+        isBusy = nextBusy;
+        exportButton.disabled = nextBusy;
+        if (txtPrintButton) txtPrintButton.disabled = nextBusy;
+        clearButton.disabled = nextBusy;
+        sourceUrl.disabled = nextBusy;
+        maxMatches.disabled = nextBusy;
+        buttonSpinner.classList.toggle("hidden", !showSpinner);
+        buttonIcon.classList.toggle("hidden", showSpinner);
+        updateOutputButtons();
+    }
+
+    function setStatus(message, isError = false) {
+        statusBox.textContent = message;
+        statusBox.classList.toggle("is-error", isError);
+    }
+
+    function setPreview(text) {
+        currentOutput = text;
+        preview.textContent = text || "Chưa có dữ liệu";
+        preview.classList.toggle("empty", !text);
+        updateOutputButtons();
+    }
+
+    function resetStorageLink() {
+        storageLink.href = "#";
+        storageLink.classList.add("hidden");
+        storageEmpty.classList.remove("hidden");
+    }
+
+    function setStorageLink(url) {
+        storageLink.href = url;
+        storageLink.textContent = "Mở link";
+        storageLink.classList.remove("hidden");
+        storageEmpty.classList.add("hidden");
+    }
+
+    function downloadFile(name, content, format) {
+        const type = format === "json" ? "application/json;charset=utf-8" : "text/plain;charset=utf-8";
+        const blob = new Blob([content], { type });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = name;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+        return blob.size;
+    }
+
+    async function readError(response) {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+            const data = await response.json();
+            return data.error || JSON.stringify(data);
+        }
+        return response.text();
+    }
+
+    async function copyText(text) {
+        if (navigator.clipboard?.writeText && document.hasFocus()) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (error) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // --- API CORE ---
+    async function crawlOutput(urlValues, format, maxValue) {
+        const apiFormat = format === "txt" ? "m3u" : "json";
+        const values = Array.isArray(urlValues) ? urlValues : [urlValues];
+        let response;
+        if (values.length > 1) {
+            response = await fetch(getMergePath(), {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: format === "json" ? "application/json" : "text/plain"
+                },
+                body: JSON.stringify({ links: values, format: apiFormat, max: maxValue }),
+            });
+        } else {
+            const params = new URLSearchParams({ format: apiFormat, link: values[0], max: String(maxValue) });
+            response = await fetch(`${getApiPath()}?${params.toString()}`, {
+                headers: { Accept: format === "json" ? "application/json" : "text/plain" },
+            });
+        }
+        if (!response.ok) throw new Error(await readError(response));
+        return format === "json" ? JSON.stringify(await response.json(), null, 2) : await response.text();
+    }
+
+    async function uploadOutput(filename, format, content) {
+        const response = await fetch(getDatabaseSavePath(), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json"
+            },
+            body: JSON.stringify({ filename, format, content }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || "Không tạo được link trên Database");
+        return data;
+    }
+
+    // --- EVENTS ---
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const urlValues = parseSourceUrls(sourceUrl.value);
+        const format = selectedFormat();
+        const maxValue = Math.max(1, Math.min(Number(maxMatches.value) || 80, 80));
         
-        if not content:
-            return {"ok": False, "error": "Nội dung trống"}, 400
-            
-        collection, cfg = get_mongo_collection()
-        
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
-        expiration_time = datetime.utcnow() + timedelta(hours=cfg["ttl_hours"])
-        
-        document = {
-            "filename": safe_name,
-            "content": content,
-            "createdAt": datetime.utcnow(),
-            "expireAt": expiration_time
+        if (!urlValues.length) {
+            setStatus("Nhập link nguồn", true);
+            sourceUrl.focus();
+            return;
         }
         
-        result = collection.insert_one(document)
-        doc_id = str(result.inserted_id)
+        currentFileName = "";
+        currentFormat = format;
+        currentSize = 0;
+        resetStorageLink();
+        setPreview("");
+        setBusy(true, true);
         
-        public_url = f"{request.host_url}playlist/{doc_id}"
-        
-        return {"ok": True, "url": public_url}
-        
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
-
-@app.route("/playlist/<doc_id>", methods=["GET"])
-def route_serve_playlist(doc_id):
-    try:
-        collection, _ = get_mongo_collection()
-        document = collection.find_one({"_id": ObjectId(doc_id)})
-        
-        if not document:
-            return Response("Playlist không tồn tại hoặc đã hết hạn", status=404)
+        try {
+            const name = buildFileName(urlValues, format);
+            setStatus(urlValues.length > 1 ? "Đang gộp..." : "Đang crawl...");
+            const output = await crawlOutput(urlValues, format, maxValue);
+            const size = new Blob([output]).size;
             
-        return Response(document["content"], content_type="text/plain; charset=utf-8")
-        
-    except Exception as e:
-        return Response(f"Lỗi truy xuất: {str(e)}", status=500)
+            currentFileName = name;
+            currentFormat = format;
+            currentSize = size;
+            
+            setPreview(output);
+            fileName.textContent = name;
+            fileSize.textContent = formatBytes(size);
+            createdAt.textContent = new Date().toLocaleString("vi-VN");
+            
+            setStatus("Đang lưu vào Database...");
+            const uploaded = await uploadOutput(name, format, output);
+            
+            const link = uploaded.url; 
+            setStorageLink(link);
+            
+            const copied = await copyText(link);
+            setStatus(copied ? "Đã lấy link và sao chép" : "Đã lấy link.");
+            
+        } catch (error) {
+            setStatus(error.message, true);
+        } finally {
+            setBusy(false);
+        }
+    });
 
-# --- CLIENT ---
-@app.route("/")
-def serve_index():
-    return send_from_directory(str(ROOT), "index.html")
+    if (txtPrintButton) {
+        txtPrintButton.addEventListener("click", () => {
+            if (!currentOutput || currentFormat !== "json") return;
+            setStatus("Đang chuyển đổi JSON sang M3U...");
+            const m3uText = convertJsonToM3u(currentOutput);
+            
+            currentOutput = m3uText;
+            currentFormat = "txt";
+            currentFileName = currentFileName.replace(".json", ".txt");
+            const newSize = new Blob([m3uText]).size;
+            
+            setPreview(m3uText);
+            fileName.textContent = currentFileName;
+            fileSize.textContent = formatBytes(newSize);
+            setStatus("Đã hiển thị dạng TXT (M3U)");
+        });
+    }
 
-@app.route("/assets/<path:path>")
-def serve_assets(path):
-    return send_from_directory(str(ROOT / "assets"), path)
+    clearButton.addEventListener("click", () => {
+        setPreview("");
+        currentFileName = "";
+        currentFormat = "json";
+        currentSize = 0;
+        fileName.textContent = "-";
+        fileSize.textContent = "-";
+        createdAt.textContent = "-";
+        resetStorageLink();
+        setStatus("Sẵn sàng");
+        sourceUrl.focus();
+    });
 
-if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    copyButton.addEventListener("click", async () => {
+        if (!currentOutput) return;
+        const copied = await copyText(currentOutput);
+        setStatus(copied ? "Đã sao chép nội dung" : "Lỗi sao chép", !copied);
+    });
+
+    downloadButton.addEventListener("click", () => {
+        if (!currentOutput || !currentFileName) return;
+        const size = downloadFile(currentFileName, currentOutput, currentFormat);
+        fileSize.textContent = formatBytes(size);
+        setStatus("Đã tải file");
+    });
+})();
