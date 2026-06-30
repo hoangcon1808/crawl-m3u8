@@ -7,6 +7,7 @@ from urllib.parse import quote
 from datetime import datetime, timedelta
 
 import requests
+import certifi  # Thư viện chứng chỉ SSL để fix lỗi trên Vercel
 from flask import Flask, Response, request, send_from_directory
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -54,8 +55,12 @@ def get_mongo_collection():
         raise ValueError("Thiếu cấu hình MONGO_URI trong Environment Vercel")
     
     if mongo_client is None:
-        # Giới hạn thời gian kết nối 5 giây để Vercel không bị treo vĩnh viễn
-        mongo_client = MongoClient(cfg["uri"], serverSelectionTimeoutMS=5000)
+        # Tích hợp certifi để Vercel không bị lỗi SSL Handshake với MongoDB Atlas
+        mongo_client = MongoClient(
+            cfg["uri"], 
+            serverSelectionTimeoutMS=5000,
+            tlsCAFile=certifi.where()
+        )
         
     db = mongo_client[cfg["db_name"]]
     return db[cfg["collection"]], cfg
@@ -116,7 +121,6 @@ def route_merge():
 @app.route("/api/database/save", methods=["POST"])
 def route_save_to_mongo():
     """Lưu nội dung m3u vào MongoDB và trả về link"""
-    # GỌI TẠO INDEX Ở ĐÂY: An toàn, không gây crash lúc Vercel khởi động
     ensure_ttl_index()
     
     data = request.get_json(silent=True) or {}
@@ -129,7 +133,6 @@ def route_save_to_mongo():
     try:
         collection, cfg = get_mongo_collection()
         
-        # Làm sạch tên file và tính toán thời gian xoá
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
         expiration_time = datetime.utcnow() + timedelta(hours=cfg["ttl_hours"])
         
@@ -140,17 +143,14 @@ def route_save_to_mongo():
             "expireAt": expiration_time
         }
         
-        # Lưu vào Database
         result = collection.insert_one(document)
         doc_id = str(result.inserted_id)
         
-        # Build đường link kết quả
         public_url = f"{request.host_url}playlist/{doc_id}"
         
         return {"ok": True, "url": public_url}
         
     except Exception as e:
-        # Nếu MongoDB chưa mở khoá IP, lỗi sẽ hiện ra rõ ràng thay vì crash 500 ảo
         return {"ok": False, "error": str(e)}, 500
 
 @app.route("/playlist/<doc_id>", methods=["GET"])
