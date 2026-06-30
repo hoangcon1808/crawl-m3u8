@@ -121,9 +121,16 @@ def route_merge():
 @app.route("/api/database/save", methods=["POST"])
 def route_save_to_mongo():
     """Lưu nội dung m3u vào MongoDB và trả về link"""
-    ensure_ttl_index()
+    
+    # SỬA Ở ĐÂY: Thêm try-except bao quanh để lỗi Index không làm sập API
+    try:
+        ensure_ttl_index()
+    except Exception as e:
+        print(f"Bỏ qua lỗi tạo Index: {e}") 
     
     data = request.get_json(silent=True) or {}
+    # ... (giữ nguyên các phần code còn lại bên dưới)
+
     filename = data.get("filename", "playlist.m3u")
     content = to_clean_text(data.get("content", ""))
     
