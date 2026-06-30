@@ -1,17 +1,15 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
+  "version": 2,
+  "builds": [
     {
-      "source": "/api/crawl",
-      "destination": "/api"
-    },
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
     {
-      "source": "/api/merge",
-      "destination": "/api"
-    },
-    {
-      "source": "/api/supabase/upload",
-      "destination": "/api"
+      "src": "/(.*)",
+      "dest": "api/index.py"
     }
   ]
 }
