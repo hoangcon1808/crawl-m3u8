@@ -47,23 +47,25 @@ def get_mongo_cfg():
     }
 
 def get_mongo_collection():
-    """Lấy collection từ MongoDB, tự động kết nối nếu chưa có"""
     global mongo_client
     cfg = get_mongo_cfg()
     
     if not cfg["uri"]:
-        raise ValueError("Thiếu cấu hình MONGO_URI trong Environment Vercel")
+        raise ValueError("Thiếu cấu hình MONGO_URI")
     
     if mongo_client is None:
-        # Tích hợp certifi để Vercel không bị lỗi SSL Handshake với MongoDB Atlas
+        # Cấu hình "kích hoạt" kết nối bền bỉ hơn
         mongo_client = MongoClient(
             cfg["uri"], 
-            serverSelectionTimeoutMS=5000,
-            tlsCAFile=certifi.where()
+            serverSelectionTimeoutMS=10000, # Tăng thời gian chờ
+            tls=True,                       # Ép buộc TLS
+            tlsCAFile=certifi.where(),      # Sử dụng chứng chỉ từ certifi
+            tlsAllowInvalidCertificates=True # TẠM THỜI BỎ QUA XÁC THỰC SSL (Để debug)
         )
         
     db = mongo_client[cfg["db_name"]]
     return db[cfg["collection"]], cfg
+
 
 def ensure_ttl_index():
     """Tự động tạo TTL Index để dọn rác tự động"""
