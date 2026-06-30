@@ -32,7 +32,7 @@ load_dotenv() # Tự động load biến môi trường từ file .env nếu có
 
 # --- CẤU HÌNH & KẾT NỐI MONGODB ---
 
-# Khởi tạo client global để tận dụng connection pooling trên serverless (Vercel)
+# Khởi tạo client global để tận dụng connection pooling trên serverless
 mongo_client = None
 
 def get_mongo_cfg():
@@ -51,10 +51,11 @@ def get_mongo_collection():
     cfg = get_mongo_cfg()
     
     if not cfg["uri"]:
-        raise ValueError("Thiếu cấu hình MONGO_URI trong file .env")
+        raise ValueError("Thiếu cấu hình MONGO_URI trong Environment Vercel")
     
     if mongo_client is None:
-        mongo_client = MongoClient(cfg["uri"])
+        # Giới hạn thời gian kết nối 5 giây để Vercel không bị treo vĩnh viễn
+        mongo_client = MongoClient(cfg["uri"], serverSelectionTimeoutMS=5000)
         
     db = mongo_client[cfg["db_name"]]
     return db[cfg["collection"]], cfg
@@ -64,21 +65,14 @@ def ensure_ttl_index():
     try:
         collection, cfg = get_mongo_collection()
         if cfg["enable_ttl"]:
-            # Tạo index trên trường expireAt. Nếu đã có thì MongoDB sẽ bỏ qua
             collection.create_index("expireAt", expireAfterSeconds=0)
     except Exception as e:
         print(f"Lưu ý (MongoDB Index): {e}")
 
-# Gọi hàm tạo Index một lần khi khởi động app
-ensure_ttl_index()
-
 # --- HÀM TRỢ GIÚP ---
 
 def to_clean_text(data):
-    """
-    CHỐT: Chuyển đổi List [] hoặc dữ liệu thô sang văn bản xuống dòng sạch sẽ.
-    Fix lỗi app hiển thị dạng ['link1', 'link2'].
-    """
+    """Chuyển đổi List [] hoặc dữ liệu thô sang văn bản xuống dòng sạch sẽ"""
     if isinstance(data, list):
         return "\n".join(str(item).strip() for item in data if item)
     return str(data or "").strip()
@@ -121,7 +115,10 @@ def route_merge():
 
 @app.route("/api/database/save", methods=["POST"])
 def route_save_to_mongo():
-    """Lưu nội dung m3u vào MongoDB (Thay thế cho Supabase Upload)"""
+    """Lưu nội dung m3u vào MongoDB và trả về link"""
+    # GỌI TẠO INDEX Ở ĐÂY: An toàn, không gây crash lúc Vercel khởi động
+    ensure_ttl_index()
+    
     data = request.get_json(silent=True) or {}
     filename = data.get("filename", "playlist.m3u")
     content = to_clean_text(data.get("content", ""))
@@ -132,62 +129,54 @@ def route_save_to_mongo():
     try:
         collection, cfg = get_mongo_collection()
         
-        # Làm sạch tên hiển thị
+        # Làm sạch tên file và tính toán thời gian xoá
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
-        
-        # Tính toán thời gian xóa tự động (TTL)
         expiration_time = datetime.utcnow() + timedelta(hours=cfg["ttl_hours"])
         
         document = {
             "filename": safe_name,
             "content": content,
             "createdAt": datetime.utcnow(),
-            "expireAt": expiration_time  # Trường này báo cho Mongo biết lúc nào cần xóa
+            "expireAt": expiration_time
         }
         
-        # Thực hiện lưu vào DB
+        # Lưu vào Database
         result = collection.insert_one(document)
         doc_id = str(result.inserted_id)
         
-        # Tạo URL để trình duyệt/app có thể đọc nội dung file
-        # request.host_url sẽ tự động bắt domain hiện tại (local hoặc Vercel)
+        # Build đường link kết quả
         public_url = f"{request.host_url}playlist/{doc_id}"
         
         return {"ok": True, "url": public_url}
         
     except Exception as e:
+        # Nếu MongoDB chưa mở khoá IP, lỗi sẽ hiện ra rõ ràng thay vì crash 500 ảo
         return {"ok": False, "error": str(e)}, 500
 
 @app.route("/playlist/<doc_id>", methods=["GET"])
 def route_serve_playlist(doc_id):
-    """Endpoint để hiển thị nội dung file dạng text/plain cho App IPTV"""
+    """Endpoint in nội dung m3u ra text/plain cho App IPTV đọc"""
     try:
         collection, _ = get_mongo_collection()
-        
-        # Tìm dữ liệu trong DB
         document = collection.find_one({"_id": ObjectId(doc_id)})
         
         if not document:
             return Response("Playlist không tồn tại hoặc đã hết hạn", status=404)
             
-        # Trả về văn bản gốc, app đọc m3u sẽ nhận diện được ngay
         return Response(document["content"], content_type="text/plain; charset=utf-8")
         
     except Exception as e:
-        return Response(f"Lỗi: {str(e)}", status=500)
+        return Response(f"Lỗi truy xuất: {str(e)}", status=500)
 
 # --- CUNG CẤP GIAO DIỆN (CLIENT) ---
 
 @app.route("/")
 def serve_index():
-    """Trả về file index.html từ thư mục gốc"""
     return send_from_directory(str(ROOT), "index.html")
 
 @app.route("/assets/<path:path>")
 def serve_assets(path):
-    """Trả về các file assets (css, js, img)"""
     return send_from_directory(str(ROOT / "assets"), path)
 
 if __name__ == "__main__":
-    # Chạy cục bộ (Local)
     app.run(host="127.0.0.1", port=5000, debug=True)
