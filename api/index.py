@@ -4,10 +4,13 @@ import re
 import sys
 from pathlib import Path
 from urllib.parse import quote
+from datetime import datetime, timedelta
 
 import requests
 from flask import Flask, Response, request, send_from_directory
 from dotenv import load_dotenv
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 # 1. Thiết lập đường dẫn để Import module crawl_to_m3u.py
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +30,49 @@ except ImportError:
 app = Flask(__name__)
 load_dotenv() # Tự động load biến môi trường từ file .env nếu có
 
-# --- CẤU HÌNH TRỢ GIÚP ---
+# --- CẤU HÌNH & KẾT NỐI MONGODB ---
+
+# Khởi tạo client global để tận dụng connection pooling trên serverless (Vercel)
+mongo_client = None
+
+def get_mongo_cfg():
+    """Lấy cấu hình MongoDB từ môi trường"""
+    return {
+        "uri": os.getenv("MONGO_URI", "").strip(),
+        "db_name": os.getenv("MONGO_DB_NAME", "crawl_database").strip(),
+        "collection": os.getenv("MONGO_COLLECTION_NAME", "stream_links").strip(),
+        "enable_ttl": os.getenv("MONGO_ENABLE_TTL", "true").lower() == "true",
+        "ttl_hours": int(os.getenv("MONGO_TTL_HOURS", "24").strip())
+    }
+
+def get_mongo_collection():
+    """Lấy collection từ MongoDB, tự động kết nối nếu chưa có"""
+    global mongo_client
+    cfg = get_mongo_cfg()
+    
+    if not cfg["uri"]:
+        raise ValueError("Thiếu cấu hình MONGO_URI trong file .env")
+    
+    if mongo_client is None:
+        mongo_client = MongoClient(cfg["uri"])
+        
+    db = mongo_client[cfg["db_name"]]
+    return db[cfg["collection"]], cfg
+
+def ensure_ttl_index():
+    """Tự động tạo TTL Index để dọn rác tự động"""
+    try:
+        collection, cfg = get_mongo_collection()
+        if cfg["enable_ttl"]:
+            # Tạo index trên trường expireAt. Nếu đã có thì MongoDB sẽ bỏ qua
+            collection.create_index("expireAt", expireAfterSeconds=0)
+    except Exception as e:
+        print(f"Lưu ý (MongoDB Index): {e}")
+
+# Gọi hàm tạo Index một lần khi khởi động app
+ensure_ttl_index()
+
+# --- HÀM TRỢ GIÚP ---
 
 def to_clean_text(data):
     """
@@ -38,37 +83,6 @@ def to_clean_text(data):
         return "\n".join(str(item).strip() for item in data if item)
     return str(data or "").strip()
 
-def get_supabase_cfg():
-    """Lấy cấu hình Supabase từ môi trường"""
-    return {
-        "url": os.getenv("SUPABASE_URL", "").strip().rstrip("/"),
-        "key": os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
-        "bucket": os.getenv("SUPABASE_STORAGE_BUCKET", "link").strip(),
-        "is_public": os.getenv("SUPABASE_PUBLIC_BUCKET", "true").lower() == "true",
-        "folder": os.getenv("SUPABASE_UPLOAD_DIR", "exports").strip("/")
-    }
-
-def ensure_bucket():
-    """Tự động kiểm tra và tạo Bucket trên Supabase nếu chưa có"""
-    cfg = get_supabase_cfg()
-    if not cfg["url"] or not cfg["key"]: return cfg["bucket"]
-    
-    headers = {"apikey": cfg["key"], "Authorization": f"Bearer {cfg['key']}"}
-    try:
-        res = requests.get(f"{cfg['url']}/storage/v1/bucket", headers=headers, timeout=5)
-        if res.status_code == 200:
-            buckets = res.json()
-            if not any(b.get("id") == cfg["bucket"] for b in buckets):
-                requests.post(
-                    f"{cfg['url']}/storage/v1/bucket", 
-                    headers=headers, 
-                    json={"id": cfg["bucket"], "name": cfg["bucket"], "public": cfg["is_public"]},
-                    timeout=5
-                )
-    except Exception as e:
-        print(f"Lỗi Bucket: {e}")
-    return cfg["bucket"]
-
 # --- CÁC ĐẦU MỤC API (ROUTES) ---
 
 @app.route("/api/crawl")
@@ -77,13 +91,10 @@ def route_crawl():
     link = request.args.get("link") or crawl_to_m3u.START_URL
     fmt = request.args.get("format", "json").lower()
     max_m = int(request.args.get("max", 80))
-    
     try:
         result = crawl_to_m3u.crawl(max_matches=max_m, source_url=link)
         if fmt in ["m3u", "txt"]:
-            # Trả về văn bản thuần túy cho trình duyệt in ra màn hình
             return Response(to_clean_text(result.get("m3u")), content_type="text/plain; charset=utf-8")
-        
         return Response(json.dumps(result.get("json"), ensure_ascii=False), content_type="application/json")
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
@@ -100,58 +111,70 @@ def route_merge():
         links = request.args.getlist("link") or request.args.get("links", "").split()
         fmt = request.args.get("format", "json").lower()
         max_m = int(request.args.get("max", 80))
-
     try:
         result = crawl_to_m3u.merge_crawls(links, max_matches=max_m)
         if fmt in ["m3u", "txt"]:
             return Response(to_clean_text(result.get("m3u")), content_type="text/plain; charset=utf-8")
-        
         return Response(json.dumps(result.get("json"), ensure_ascii=False), content_type="application/json")
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-@app.route("/api/supabase/upload", methods=["POST"])
-def route_upload():
-    """Tải nội dung lên Supabase Storage với cấu hình in ra màn hình (không tải về)"""
+@app.route("/api/database/save", methods=["POST"])
+def route_save_to_mongo():
+    """Lưu nội dung m3u vào MongoDB (Thay thế cho Supabase Upload)"""
     data = request.get_json(silent=True) or {}
     filename = data.get("filename", "playlist.m3u")
     content = to_clean_text(data.get("content", ""))
     
     if not content:
         return {"ok": False, "error": "Nội dung trống"}, 400
-
-    cfg = get_supabase_cfg()
-    if not cfg["url"]:
-        return {"ok": False, "error": "Thiếu thông tin cấu hình Supabase"}, 500
-
+        
     try:
-        bucket = ensure_bucket()
-        # Làm sạch tên file và xây dựng đường dẫn lưu trữ
+        collection, cfg = get_mongo_collection()
+        
+        # Làm sạch tên hiển thị
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-")
-        obj_path = f"{cfg['folder']}/{safe_name}" if cfg['folder'] else safe_name
         
-        # Thực hiện tải lên với Content-Type là text/plain để trình duyệt hiển thị nội dung trực tiếp
-        response = requests.post(
-            f"{cfg['url']}/storage/v1/object/{quote(bucket)}/{quote(obj_path, safe='/')}",
-            headers={
-                "apikey": cfg["key"], 
-                "Authorization": f"Bearer {cfg['key']}", 
-                "x-upsert": "true",
-                "Content-Type": "text/plain; charset=utf-8" # QUAN TRỌNG: Để không bị tải về
-            },
-            data=content.encode("utf-8"),
-            timeout=30
-        )
+        # Tính toán thời gian xóa tự động (TTL)
+        expiration_time = datetime.utcnow() + timedelta(hours=cfg["ttl_hours"])
         
-        if response.status_code not in [200, 201]:
-            return {"ok": False, "error": response.text}, response.status_code
-            
-        # Trả về link công khai
-        final_url = f"{cfg['url']}/storage/v1/object/public/{quote(bucket)}/{quote(obj_path, safe='/')}"
-        return {"ok": True, "url": final_url}
+        document = {
+            "filename": safe_name,
+            "content": content,
+            "createdAt": datetime.utcnow(),
+            "expireAt": expiration_time  # Trường này báo cho Mongo biết lúc nào cần xóa
+        }
+        
+        # Thực hiện lưu vào DB
+        result = collection.insert_one(document)
+        doc_id = str(result.inserted_id)
+        
+        # Tạo URL để trình duyệt/app có thể đọc nội dung file
+        # request.host_url sẽ tự động bắt domain hiện tại (local hoặc Vercel)
+        public_url = f"{request.host_url}playlist/{doc_id}"
+        
+        return {"ok": True, "url": public_url}
         
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
+
+@app.route("/playlist/<doc_id>", methods=["GET"])
+def route_serve_playlist(doc_id):
+    """Endpoint để hiển thị nội dung file dạng text/plain cho App IPTV"""
+    try:
+        collection, _ = get_mongo_collection()
+        
+        # Tìm dữ liệu trong DB
+        document = collection.find_one({"_id": ObjectId(doc_id)})
+        
+        if not document:
+            return Response("Playlist không tồn tại hoặc đã hết hạn", status=404)
+            
+        # Trả về văn bản gốc, app đọc m3u sẽ nhận diện được ngay
+        return Response(document["content"], content_type="text/plain; charset=utf-8")
+        
+    except Exception as e:
+        return Response(f"Lỗi: {str(e)}", status=500)
 
 # --- CUNG CẤP GIAO DIỆN (CLIENT) ---
 
