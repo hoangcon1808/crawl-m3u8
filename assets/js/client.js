@@ -1,13 +1,11 @@
 (() => {
     "use strict";
-
+    
     const form = document.querySelector("#crawlForm");
     const sourceUrl = document.querySelector("#sourceUrl");
     const maxMatches = document.querySelector("#maxMatches");
     const exportButton = document.querySelector("#exportButton");
-    // Nút mới thêm vào
-    const txtPrintButton = document.querySelector("#txtPrintButton"); 
-    
+    const txtPrintButton = document.querySelector("#txtPrintButton");
     const buttonSpinner = document.querySelector("#buttonSpinner");
     const buttonIcon = document.querySelector("#buttonIcon");
     const clearButton = document.querySelector("#clearButton");
@@ -20,7 +18,7 @@
     const createdAt = document.querySelector("#createdAt");
     const storageLink = document.querySelector("#storageLink");
     const storageEmpty = document.querySelector("#storageEmpty");
-
+    
     let currentOutput = "";
     let currentFileName = "";
     let currentFormat = "json";
@@ -28,7 +26,7 @@
     let isBusy = false;
 
     // --- HELPER FUNCTIONS ---
-
+    
     function getApiPath() {
         return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/crawl" : "/api/crawl";
     }
@@ -37,8 +35,9 @@
         return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/merge" : "/api/merge";
     }
 
-    function getStorageUploadPath() {
-        return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/supabase/upload" : "/api/supabase/upload";
+    // ĐÃ SỬA: Trỏ về API lưu Database thay vì Supabase
+    function getDatabaseSavePath() {
+        return window.location.protocol === "file:" ? "http://127.0.0.1:5000/api/database/save" : "/api/database/save";
     }
 
     function selectedFormat() {
@@ -74,13 +73,16 @@
         const values = Array.isArray(urlValues) ? urlValues : [urlValues];
         const ext = format === "json" ? "json" : (format === "txt" ? "txt" : "m3u");
         if (values.length > 1) return `bongda.${ext}`;
+        
         const urlValue = values[0] || "";
         let label = "crawl";
         try {
             const parsed = new URL(urlValue);
             const hostParts = parsed.hostname.replace(/^www\./, "").split(".").filter(Boolean);
             label = hostParts.length > 1 ? hostParts.slice(0, -1).join("-") : hostParts[0] || label;
-        } catch (error) { label = urlValue; }
+        } catch (error) {
+            label = urlValue;
+        }
         return `${slugify(label)}.${ext}`;
     }
 
@@ -186,13 +188,15 @@
             try {
                 await navigator.clipboard.writeText(text);
                 return true;
-            } catch (error) { return false; }
+            } catch (error) {
+                return false;
+            }
         }
         return false;
     }
 
     // --- API CORE ---
-
+    
     async function crawlOutput(urlValues, format, maxValue) {
         const apiFormat = format === "txt" ? "m3u" : "json";
         const values = Array.isArray(urlValues) ? urlValues : [urlValues];
@@ -200,71 +204,96 @@
         if (values.length > 1) {
             response = await fetch(getMergePath(), {
                 method: "POST",
-                headers: { "Content-Type": "application/json", Accept: format === "json" ? "application/json" : "text/plain" },
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: format === "json" ? "application/json" : "text/plain"
+                },
                 body: JSON.stringify({ links: values, format: apiFormat, max: maxValue }),
             });
         } else {
             const params = new URLSearchParams({ format: apiFormat, link: values[0], max: String(maxValue) });
             response = await fetch(`${getApiPath()}?${params.toString()}`, {
-                headers: { Accept: format === "json" ? "application/json" : "text/plain" },
+                headers: {
+                    Accept: format === "json" ? "application/json" : "text/plain"
+                },
             });
         }
         if (!response.ok) throw new Error(await readError(response));
         return format === "json" ? JSON.stringify(await response.json(), null, 2) : await response.text();
     }
 
+    // ĐÃ SỬA: Sử dụng getDatabaseSavePath()
     async function uploadOutput(filename, format, content) {
-        const response = await fetch(getStorageUploadPath(), {
+        const response = await fetch(getDatabaseSavePath(), {
             method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json"
+            },
             body: JSON.stringify({ filename, format, content }),
         });
         const data = await response.json();
-        if (!response.ok || !data.ok) throw new Error(data.error || "Không lấy được link");
+        if (!response.ok || !data.ok) throw new Error(data.error || "Không tạo được link trên Database");
         return data;
     }
 
     // --- EVENTS ---
-
+    
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const urlValues = parseSourceUrls(sourceUrl.value);
         const format = selectedFormat();
         const maxValue = Math.max(1, Math.min(Number(maxMatches.value) || 80, 80));
-
-        if (!urlValues.length) { setStatus("Nhập link nguồn", true); sourceUrl.focus(); return; }
-
-        currentFileName = ""; currentFormat = format; currentSize = 0;
-        resetStorageLink(); setPreview(""); setBusy(true, true);
-
+        
+        if (!urlValues.length) {
+            setStatus("Nhập link nguồn", true);
+            sourceUrl.focus();
+            return;
+        }
+        
+        currentFileName = "";
+        currentFormat = format;
+        currentSize = 0;
+        resetStorageLink();
+        setPreview("");
+        setBusy(true, true);
+        
         try {
             const name = buildFileName(urlValues, format);
             setStatus(urlValues.length > 1 ? "Đang gộp..." : "Đang crawl...");
             const output = await crawlOutput(urlValues, format, maxValue);
-            
             const size = new Blob([output]).size;
-            currentFileName = name; currentFormat = format; currentSize = size;
+            
+            currentFileName = name;
+            currentFormat = format;
+            currentSize = size;
             
             setPreview(output);
             fileName.textContent = name;
             fileSize.textContent = formatBytes(size);
             createdAt.textContent = new Date().toLocaleString("vi-VN");
-
-            setStatus("Đang upload...");
+            
+            setStatus("Đang lưu vào Database...");
             const uploaded = await uploadOutput(name, format, output);
-            const link = uploaded.direct_url || uploaded.shared_url || uploaded.url;
+            
+            // ĐÃ SỬA: Đọc chuẩn URL từ API Flask trả về
+            const link = uploaded.url; 
             setStorageLink(link);
             
             const copied = await copyText(link);
             setStatus(copied ? "Đã lấy link và sao chép" : "Đã lấy link.");
-        } catch (error) { setStatus(error.message, true); } finally { setBusy(false); }
+            
+        } catch (error) {
+            setStatus(error.message, true);
+        } finally {
+            setBusy(false);
+        }
     });
 
     // Event Xử lý nút Hiện TXT (M3U) từ JSON
     if (txtPrintButton) {
         txtPrintButton.addEventListener("click", () => {
             if (!currentOutput || currentFormat !== "json") return;
-            
             setStatus("Đang chuyển đổi JSON sang M3U...");
             const m3uText = convertJsonToM3u(currentOutput);
             
@@ -283,9 +312,16 @@
     }
 
     clearButton.addEventListener("click", () => {
-        setPreview(""); currentFileName = ""; currentFormat = "json"; currentSize = 0;
-        fileName.textContent = "-"; fileSize.textContent = "-"; createdAt.textContent = "-";
-        resetStorageLink(); setStatus("Sẵn sàng"); sourceUrl.focus();
+        setPreview("");
+        currentFileName = "";
+        currentFormat = "json";
+        currentSize = 0;
+        fileName.textContent = "-";
+        fileSize.textContent = "-";
+        createdAt.textContent = "-";
+        resetStorageLink();
+        setStatus("Sẵn sàng");
+        sourceUrl.focus();
     });
 
     copyButton.addEventListener("click", async () => {
@@ -300,5 +336,4 @@
         fileSize.textContent = formatBytes(size);
         setStatus("Đã tải file");
     });
-
 })();
